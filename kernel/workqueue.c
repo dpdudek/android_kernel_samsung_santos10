@@ -43,7 +43,6 @@
 #include <linux/idr.h>
 
 #include "workqueue_sched.h"
-#include <asm/sec_addon.h>
 
 enum {
 	/* global_cwq flags */
@@ -1737,6 +1736,7 @@ static void cwq_activate_first_delayed(struct cpu_workqueue_struct *cwq)
 {
 	struct work_struct *work = list_first_entry(&cwq->delayed_works,
 						    struct work_struct, entry);
+
 	cwq_activate_delayed_work(work);
 }
 
@@ -1744,6 +1744,7 @@ static void cwq_activate_first_delayed(struct cpu_workqueue_struct *cwq)
  * cwq_dec_nr_in_flight - decrement cwq's nr_in_flight
  * @cwq: cwq of interest
  * @color: color of work which left the queue
+ * @delayed: for a delayed work
  *
  * A work either has completed or is removed from pending queue,
  * decrement nr_in_flight of its cwq and handle workqueue flushing.
@@ -1751,7 +1752,8 @@ static void cwq_activate_first_delayed(struct cpu_workqueue_struct *cwq)
  * CONTEXT:
  * spin_lock_irq(gcwq->lock).
  */
-static void cwq_dec_nr_in_flight(struct cpu_workqueue_struct *cwq, int color)
+static void cwq_dec_nr_in_flight(struct cpu_workqueue_struct *cwq, int color,
+				 bool delayed)
 {
 	/* ignore uncolored works */
 	if (color == WORK_NO_COLOR)
@@ -1759,11 +1761,13 @@ static void cwq_dec_nr_in_flight(struct cpu_workqueue_struct *cwq, int color)
 
 	cwq->nr_in_flight[color]--;
 
-	cwq->nr_active--;
-	if (!list_empty(&cwq->delayed_works)) {
-		/* one down, submit a delayed one */
-		if (cwq->nr_active < cwq->max_active)
-			cwq_activate_first_delayed(cwq);
+	if (!delayed) {
+		cwq->nr_active--;
+		if (!list_empty(&cwq->delayed_works)) {
+			/* one down, submit a delayed one */
+			if (cwq->nr_active < cwq->max_active)
+				cwq_activate_first_delayed(cwq);
+		}
 	}
 
 	/* is flush in progress and are we at the flushing tip? */
@@ -1873,9 +1877,7 @@ __acquires(&gcwq->lock)
 	lock_map_acquire_read(&cwq->wq->lockdep_map);
 	lock_map_acquire(&lockdep_map);
 	trace_workqueue_execute_start(work);
-	sec_debug_work_log(worker, work, f, 1);
 	f(work);
-	sec_debug_work_log(worker, work, f, 2);
 	/*
 	 * While we must be careful to not use "work" after this, the trace
 	 * point will only record its address.
@@ -1904,7 +1906,7 @@ __acquires(&gcwq->lock)
 	hlist_del_init(&worker->hentry);
 	worker->current_work = NULL;
 	worker->current_cwq = NULL;
-	cwq_dec_nr_in_flight(cwq, work_color);
+	cwq_dec_nr_in_flight(cwq, work_color, false);
 }
 
 /**
@@ -2642,10 +2644,10 @@ static int try_to_grab_pending(struct work_struct *work)
 			if (*work_data_bits(work) & WORK_STRUCT_DELAYED)
 				cwq_activate_delayed_work(work);
 
-
 			list_del_init(&work->entry);
 			cwq_dec_nr_in_flight(get_work_cwq(work),
-				get_work_color(work));
+				get_work_color(work),
+				*work_data_bits(work) & WORK_STRUCT_DELAYED);
 			ret = 1;
 		}
 	}
