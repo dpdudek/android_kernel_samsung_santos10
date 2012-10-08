@@ -20,7 +20,7 @@
 #include <linux/slab.h>
 
 /* global SRCU for all MMs */
-static struct srcu_struct srcu;
+struct srcu_struct srcu;
 
 /*
  * This function can't run concurrently against mmu_notifier_register
@@ -37,20 +37,21 @@ static struct srcu_struct srcu;
 void __mmu_notifier_release(struct mm_struct *mm)
 {
 	struct mmu_notifier *mn;
-	struct hlist_node *node;
+	struct hlist_node *n;
 	int id;
 
 	/*
-	 * SRCU here will block mmu_notifier_unregister until
+	 * RCU here will block mmu_notifier_unregister until
 	 * ->release returns.
 	 */
 	id = srcu_read_lock(&srcu);
-	hlist_for_each_entry_rcu(mn, node, &mm->mmu_notifier_mm->list, hlist)
+	hlist_for_each_entry_rcu(mn, n, &mm->mmu_notifier_mm->list, hlist)
 		/*
-		 * If ->release runs before mmu_notifier_unregister it must be
-		 * handled, as it's the only way for the driver to flush all
-		 * existing sptes and stop the driver from establishing any more
-		 * sptes before all the pages in the mm are freed.
+		 * if ->release runs before mmu_notifier_unregister it
+		 * must be handled as it's the only way for the driver
+		 * to flush all existing sptes and stop the driver
+		 * from establishing any more sptes before all the
+		 * pages in the mm are freed.
 		 */
 		if (mn->ops->release)
 			mn->ops->release(mn, mm);
@@ -63,22 +64,22 @@ void __mmu_notifier_release(struct mm_struct *mm)
 				 hlist);
 		/*
 		 * We arrived before mmu_notifier_unregister so
-		 * mmu_notifier_unregister will do nothing other than to wait
-		 * for ->release to finish and for mmu_notifier_unregister to
-		 * return.
+		 * mmu_notifier_unregister will do nothing other than
+		 * to wait ->release to finish and
+		 * mmu_notifier_unregister to return.
 		 */
 		hlist_del_init_rcu(&mn->hlist);
 	}
 	spin_unlock(&mm->mmu_notifier_mm->lock);
 
 	/*
-	 * synchronize_srcu here prevents mmu_notifier_release from returning to
-	 * exit_mmap (which would proceed with freeing all pages in the mm)
-	 * until the ->release method returns, if it was invoked by
-	 * mmu_notifier_unregister.
+	 * synchronize_srcu here prevents mmu_notifier_release to
+	 * return to exit_mmap (which would proceed freeing all pages
+	 * in the mm) until the ->release method returns, if it was
+	 * invoked by mmu_notifier_unregister.
 	 *
-	 * The mmu_notifier_mm can't go away from under us because one mm_count
-	 * is held by exit_mmap.
+	 * The mmu_notifier_mm can't go away from under us because one
+	 * mm_count is hold by exit_mmap.
 	 */
 	synchronize_srcu(&srcu);
 }
@@ -301,31 +302,28 @@ void mmu_notifier_unregister(struct mmu_notifier *mn, struct mm_struct *mm)
 
 	if (!hlist_unhashed(&mn->hlist)) {
 		/*
-		 * SRCU here will force exit_mmap to wait for ->release to
-		 * finish before freeing the pages.
+		 * RCU here will force exit_mmap to wait ->release to finish
+		 * before freeing the pages.
 		 */
 		int id;
 
 		id = srcu_read_lock(&srcu);
 		/*
-		 * exit_mmap will block in mmu_notifier_release to guarantee
-		 * that ->release is called before freeing the pages.
+		 * exit_mmap will block in mmu_notifier_release to
+		 * guarantee ->release is called before freeing the
+		 * pages.
 		 */
 		if (mn->ops->release)
 			mn->ops->release(mn, mm);
 		srcu_read_unlock(&srcu, id);
 
 		spin_lock(&mm->mmu_notifier_mm->lock);
-		/*
-		 * Can not use list_del_rcu() since __mmu_notifier_release
-		 * can delete it before we hold the lock.
-		 */
-		hlist_del_init_rcu(&mn->hlist);
+		hlist_del_rcu(&mn->hlist);
 		spin_unlock(&mm->mmu_notifier_mm->lock);
 	}
 
 	/*
-	 * Wait for any running method to finish, of course including
+	 * Wait any running method to finish, of course including
 	 * ->release if it was run by mmu_notifier_relase instead of us.
 	 */
 	synchronize_srcu(&srcu);
