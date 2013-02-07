@@ -114,9 +114,10 @@ static void udlfb_dpy_deferred_io(struct fb_info *info,
 	list_for_each_entry(cur, &fbdefio->pagelist, lru) {
 
 		if (udl_render_hline(dev, (ufbdev->ufb.base.bits_per_pixel / 8),
-				  &urb, (char *) info->fix.smem_start,
-				  &cmd, cur->index << PAGE_SHIFT,
-				  PAGE_SIZE, &bytes_identical, &bytes_sent))
+				     &urb, (char *) info->fix.smem_start,
+				     &cmd, cur->index << PAGE_SHIFT,
+				     cur->index << PAGE_SHIFT,
+				     PAGE_SIZE, &bytes_identical, &bytes_sent))
 			goto error;
 		bytes_rendered += PAGE_SIZE;
 	}
@@ -152,23 +153,15 @@ int udl_handle_damage(struct udl_framebuffer *fb, int x, int y,
 	struct urb *urb;
 	int aligned_x;
 	int bpp = (fb->base.bits_per_pixel / 8);
+	int x2, y2;
+	bool store_for_later = false;
+	unsigned long flags;
 
 	if (!fb->active_16)
 		return 0;
 
-	if (!fb->obj->vmapping) {
-		ret = udl_gem_vmap(fb->obj);
-		if (ret == -ENOMEM) {
-			DRM_ERROR("failed to vmap fb\n");
-			return 0;
-		}
-		if (!fb->obj->vmapping) {
-			DRM_ERROR("failed to vmapping\n");
-			return 0;
-		}
-	}
-
-	start_cycles = get_cycles();
+	if (!fb->obj->vmapping)
+		udl_gem_vmap(fb->obj);
 
 	aligned_x = DL_ALIGN_DOWN(x, sizeof(unsigned long));
 	width = DL_ALIGN_UP(width + (x-aligned_x), sizeof(unsigned long));
@@ -179,18 +172,53 @@ int udl_handle_damage(struct udl_framebuffer *fb, int x, int y,
 	    (y + height > fb->base.height))
 		return -EINVAL;
 
+	/* if we are in atomic just store the info
+	   can't test inside spin lock */
+	if (in_atomic())
+		store_for_later = true;
+
+	x2 = x + width - 1;
+	y2 = y + height - 1;
+
+	spin_lock_irqsave(&fb->dirty_lock, flags);
+
+	if (fb->y1 < y)
+		y = fb->y1;
+	if (fb->y2 > y2)
+		y2 = fb->y2;
+	if (fb->x1 < x)
+		x = fb->x1;
+	if (fb->x2 > x2)
+		x2 = fb->x2;
+
+	if (store_for_later) {
+		fb->x1 = x;
+		fb->x2 = x2;
+		fb->y1 = y;
+		fb->y2 = y2;
+		spin_unlock_irqrestore(&fb->dirty_lock, flags);
+		return 0;
+	}
+
+	fb->x1 = fb->y1 = INT_MAX;
+	fb->x2 = fb->y2 = 0;
+
+	spin_unlock_irqrestore(&fb->dirty_lock, flags);
+	start_cycles = get_cycles();
+
 	urb = udl_get_urb(dev);
 	if (!urb)
 		return 0;
 	cmd = urb->transfer_buffer;
 
-	for (i = y; i < y + height ; i++) {
+	for (i = y; i <= y2 ; i++) {
 		const int line_offset = fb->base.pitches[0] * i;
 		const int byte_offset = line_offset + (x * bpp);
-
+		const int dev_byte_offset = (fb->base.width * bpp * i) + (x * bpp);
 		if (udl_render_hline(dev, bpp, &urb,
 				     (char *) fb->obj->vmapping,
-				     &cmd, byte_offset, width * bpp,
+				     &cmd, byte_offset, dev_byte_offset,
+				     (x2 - x + 1) * bpp,
 				     &bytes_identical, &bytes_sent))
 			goto error;
 	}
@@ -219,15 +247,10 @@ static int udl_fb_mmap(struct fb_info *info, struct vm_area_struct *vma)
 {
 	unsigned long start = vma->vm_start;
 	unsigned long size = vma->vm_end - vma->vm_start;
-	unsigned long offset;
+	unsigned long offset = vma->vm_pgoff << PAGE_SHIFT;
 	unsigned long page, pos;
 
-	if (vma->vm_pgoff > (~0UL >> PAGE_SHIFT))
-		return -EINVAL;
-
-	offset = vma->vm_pgoff << PAGE_SHIFT;
-
-	if (offset > info->fix.smem_len || size > info->fix.smem_len - offset)
+	if (offset + size > info->fix.smem_len)
 		return -EINVAL;
 
 	pos = (unsigned long)info->fix.smem_start + offset;
@@ -420,6 +443,7 @@ udl_framebuffer_init(struct drm_device *dev,
 {
 	int ret;
 
+	spin_lock_init(&ufb->dirty_lock);
 	ufb->obj = obj;
 	ret = drm_framebuffer_init(dev, &ufb->base, &udlfb_funcs);
 	drm_helper_mode_fill_fb_struct(&ufb->base, mode_cmd);
@@ -607,19 +631,10 @@ udl_fb_user_fb_create(struct drm_device *dev,
 	struct drm_gem_object *obj;
 	struct udl_framebuffer *ufb;
 	int ret;
-	uint32_t size;
 
 	obj = drm_gem_object_lookup(dev, file, mode_cmd->handles[0]);
 	if (obj == NULL)
 		return ERR_PTR(-ENOENT);
-
-	size = mode_cmd->pitches[0] * mode_cmd->height;
-	size = ALIGN(size, PAGE_SIZE);
-
-	if (size > obj->size) {
-		DRM_ERROR("object size not sufficient for fb %d %zu %d %d\n", size, obj->size, mode_cmd->pitches[0], mode_cmd->height);
-		return ERR_PTR(-ENOMEM);
-	}
 
 	ufb = kzalloc(sizeof(*ufb), GFP_KERNEL);
 	if (ufb == NULL)
