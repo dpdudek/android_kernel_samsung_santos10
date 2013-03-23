@@ -1023,6 +1023,7 @@ set_size:
 		mode->flags |= DRM_MODE_FLAG_PAR16_9;
 
 	mode->type = DRM_MODE_TYPE_DRIVER;
+	mode->vrefresh = drm_mode_vrefresh(mode);
 	drm_mode_set_name(mode);
 
 	return mode;
