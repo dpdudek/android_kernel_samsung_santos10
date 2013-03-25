@@ -562,6 +562,7 @@ static int ceph_x_update_authorizer(
 {
 	struct ceph_x_authorizer *au;
 	struct ceph_x_ticket_handler *th;
+	int ret;
 
 	th = get_ticket_handler(ac, peer_type);
 	if (IS_ERR(th))
