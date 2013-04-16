@@ -527,7 +527,9 @@ found:
 
 	skb_dst_drop(skb);
 
-	inet_frag_lru_move(&qp->q);
+	write_lock(&ip4_frags.lock);
+	list_move_tail(&qp->q.lru_list, &qp->q.net->lru_list);
+	write_unlock(&ip4_frags.lock);
 	return -EINPROGRESS;
 
 err:
