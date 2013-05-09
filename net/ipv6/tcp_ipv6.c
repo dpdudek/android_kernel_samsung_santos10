@@ -132,7 +132,6 @@ static int tcp_v6_connect(struct sock *sk, struct sockaddr *uaddr,
 	struct ipv6_pinfo *np = inet6_sk(sk);
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct in6_addr *saddr = NULL, *final_p, final;
-	struct ipv6_txoptions *opt;
 	struct rt6_info *rt;
 	struct flowi6 fl6;
 	struct dst_entry *dst;
@@ -252,10 +251,8 @@ static int tcp_v6_connect(struct sock *sk, struct sockaddr *uaddr,
 	fl6.flowi6_mark = sk->sk_mark;
 	fl6.fl6_dport = usin->sin6_port;
 	fl6.fl6_sport = inet->inet_sport;
-	fl6.flowi6_uid = sock_i_uid(sk);
 
-	opt = rcu_dereference_protected(np->opt, sock_owned_by_user(sk));
-	final_p = fl6_update_dst(&fl6, opt, &final);
+	final_p = fl6_update_dst(&fl6, np->opt, &final);
 
 	security_sk_classify_flow(sk, flowi6_to_flowi(&fl6));
 
@@ -298,9 +295,9 @@ static int tcp_v6_connect(struct sock *sk, struct sockaddr *uaddr,
 	}
 
 	icsk->icsk_ext_hdr_len = 0;
-	if (opt)
-		icsk->icsk_ext_hdr_len = opt->opt_flen +
-					 opt->opt_nflen;
+	if (np->opt)
+		icsk->icsk_ext_hdr_len = (np->opt->opt_flen +
+					  np->opt->opt_nflen);
 
 	tp->rx_opt.mss_clamp = IPV6_MIN_MTU - sizeof(struct tcphdr) - sizeof(struct ipv6hdr);
 
@@ -407,7 +404,6 @@ static void tcp_v6_err(struct sk_buff *skb, struct inet6_skb_parm *opt,
 			fl6.flowi6_mark = sk->sk_mark;
 			fl6.fl6_dport = inet->inet_dport;
 			fl6.fl6_sport = inet->inet_sport;
-			fl6.flowi6_uid = sock_i_uid(sk);
 			security_skb_classify_flow(skb, flowi6_to_flowi(&fl6));
 
 			dst = ip6_dst_lookup_flow(sk, &fl6, NULL, false);
@@ -497,10 +493,9 @@ static int tcp_v6_send_synack(struct sock *sk, struct request_sock *req,
 	fl6.saddr = treq->loc_addr;
 	fl6.flowlabel = 0;
 	fl6.flowi6_oif = treq->iif;
-	fl6.flowi6_mark = inet_rsk(req)->ir_mark;
+	fl6.flowi6_mark = sk->sk_mark;
 	fl6.fl6_dport = inet_rsk(req)->rmt_port;
 	fl6.fl6_sport = inet_rsk(req)->loc_port;
-	fl6.flowi6_uid = sock_i_uid(sk);
 	security_req_classify_flow(req, flowi6_to_flowi(&fl6));
 
 	opt = np->opt;
@@ -518,8 +513,7 @@ static int tcp_v6_send_synack(struct sock *sk, struct request_sock *req,
 		__tcp_v6_send_check(skb, &treq->loc_addr, &treq->rmt_addr);
 
 		fl6.daddr = treq->rmt_addr;
-		err = ip6_xmit(sk, skb, &fl6, rcu_dereference(np->opt),
-			       np->tclass);
+		err = ip6_xmit(sk, skb, &fl6, opt, np->tclass);
 		err = net_xmit_eval(err);
 	}
 
@@ -904,7 +898,6 @@ static void tcp_v6_send_response(struct sk_buff *skb, u32 seq, u32 ack, u32 win,
 	fl6.flowi6_proto = IPPROTO_TCP;
 	if (ipv6_addr_type(&fl6.daddr) & IPV6_ADDR_LINKLOCAL)
 		fl6.flowi6_oif = inet6_iif(skb);
-	fl6.flowi6_mark = IP6_REPLY_MARK(net, skb->mark);
 	fl6.fl6_dport = t1->dest;
 	fl6.fl6_sport = t1->source;
 	security_skb_classify_flow(skb, flowi6_to_flowi(&fl6));
@@ -1151,7 +1144,6 @@ static int tcp_v6_conn_request(struct sock *sk, struct sk_buff *skb)
 		TCP_ECN_create_request(req, tcp_hdr(skb));
 
 	treq->iif = sk->sk_bound_dev_if;
-	inet_rsk(req)->ir_mark = inet_request_mark(sk, skb);
 
 	/* So that link locals have meaning */
 	if (!sk->sk_bound_dev_if &&
@@ -1246,10 +1238,10 @@ static struct sock * tcp_v6_syn_recv_sock(struct sock *sk, struct sk_buff *skb,
 	struct inet6_request_sock *treq;
 	struct ipv6_pinfo *newnp, *np = inet6_sk(sk);
 	struct tcp6_sock *newtcp6sk;
-	struct ipv6_txoptions *opt;
 	struct inet_sock *newinet;
 	struct tcp_sock *newtp;
 	struct sock *newsk;
+	struct ipv6_txoptions *opt;
 #ifdef CONFIG_TCP_MD5SIG
 	struct tcp_md5sig_key *key;
 #endif
@@ -1378,15 +1370,16 @@ static struct sock * tcp_v6_syn_recv_sock(struct sock *sk, struct sk_buff *skb,
 	   but we make one more one thing there: reattach optmem
 	   to newsk.
 	 */
-	opt = rcu_dereference(np->opt);
 	if (opt) {
-		opt = ipv6_dup_options(newsk, opt);
-		RCU_INIT_POINTER(newnp->opt, opt);
+		newnp->opt = ipv6_dup_options(newsk, opt);
+		if (opt != np->opt)
+			sock_kfree_s(sk, opt, opt->tot_len);
 	}
+
 	inet_csk(newsk)->icsk_ext_hdr_len = 0;
-	if (opt)
-		inet_csk(newsk)->icsk_ext_hdr_len = opt->opt_nflen +
-						    opt->opt_flen;
+	if (newnp->opt)
+		inet_csk(newsk)->icsk_ext_hdr_len = (newnp->opt->opt_nflen +
+						     newnp->opt->opt_flen);
 
 	tcp_mtup_init(newsk);
 	tcp_sync_mss(newsk, dst_mtu(dst));
@@ -1578,7 +1571,7 @@ ipv6_pktoptions:
 		if (np->rxopt.bits.rxhlim || np->rxopt.bits.rxohlim)
 			np->mcast_hops = ipv6_hdr(opt_skb)->hop_limit;
 		if (np->rxopt.bits.rxtclass)
-			np->rcv_tclass = ipv6_tclass(ipv6_hdr(opt_skb));
+			np->rcv_tclass = ipv6_tclass(ipv6_hdr(skb));
 		if (ipv6_opt_accepted(sk, opt_skb)) {
 			skb_set_owner_r(opt_skb, sk);
 			opt_skb = xchg(&np->pktoptions, opt_skb);
@@ -2139,7 +2132,6 @@ struct proto tcpv6_prot = {
 	.proto_cgroup		= tcp_proto_cgroup,
 #endif
 	.clear_sk		= tcp_v6_clear_sk,
-	.diag_destroy		= tcp_abort,
 };
 
 static const struct inet6_protocol tcpv6_protocol = {
