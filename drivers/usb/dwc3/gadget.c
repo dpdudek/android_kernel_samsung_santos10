@@ -1627,6 +1627,7 @@ static int dwc3_gadget_start(struct usb_gadget *g,
 	return 0;
 
 err0:
+	dwc->gadget_driver = NULL;
 	spin_unlock_irqrestore(&dwc->lock, flags);
 
 	return ret;
