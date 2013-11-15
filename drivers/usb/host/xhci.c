@@ -637,6 +637,7 @@ int xhci_run(struct usb_hcd *hcd)
 		return xhci_run_finished(xhci);
 
 	xhci_dbg(xhci, "xhci_run\n");
+
 	ret = xhci_try_enable_msi(hcd);
 	if (ret)
 		return ret;
