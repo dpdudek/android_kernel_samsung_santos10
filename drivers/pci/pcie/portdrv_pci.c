@@ -211,7 +211,6 @@ static void pcie_portdrv_remove(struct pci_dev *dev)
 	if (!pci_match_id(port_runtime_pm_black_list, dev))
 		pm_runtime_get_noresume(&dev->dev);
 	pcie_port_device_remove(dev);
-	pci_disable_device(dev);
 }
 
 static int error_detected_iter(struct device *device, void *data)
