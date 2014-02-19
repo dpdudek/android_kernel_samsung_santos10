@@ -1251,7 +1251,7 @@ void ath_tx_aggr_sleep(struct ieee80211_sta *sta, struct ath_softc *sc,
 			ath_txq_unlock(sc, txq);
 			continue;
 		}
-		
+
 		buffered = !skb_queue_empty(&tid->buf_q);
 
 		tid->sched = false;
