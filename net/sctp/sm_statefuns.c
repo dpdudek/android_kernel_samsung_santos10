@@ -748,10 +748,10 @@ sctp_disposition_t sctp_sf_do_5_1D_ce(const struct sctp_endpoint *ep,
 		sctp_ierror_t ret;
 
 		/* Make sure that we and the peer are AUTH capable */
-		if (!net->sctp.auth_enable || !new_asoc->peer.auth_capable) {
+		if (!sctp_auth_enable || !new_asoc->peer.auth_capable) {
 			kfree_skb(chunk->auth_chunk);
 			sctp_association_free(new_asoc);
-			return sctp_sf_pdiscard(net, ep, asoc, type, arg, commands);
+			return sctp_sf_pdiscard(ep, asoc, type, arg, commands);
 		}
 
 		/* set-up our fake chunk so that we can process it */
@@ -3521,7 +3521,9 @@ sctp_disposition_t sctp_sf_do_asconf(const struct sctp_endpoint *ep,
 	struct sctp_chunk	*asconf_ack = NULL;
 	struct sctp_paramhdr	*err_param = NULL;
 	sctp_addiphdr_t		*hdr;
+	union sctp_addr_param	*addr_param;
 	__u32			serial;
+	int			length;
 
 	if (!sctp_vtag_verify(chunk, asoc)) {
 		sctp_add_cmd_sf(commands, SCTP_CMD_REPORT_BAD_TAG,
@@ -3546,9 +3548,18 @@ sctp_disposition_t sctp_sf_do_asconf(const struct sctp_endpoint *ep,
 	hdr = (sctp_addiphdr_t *)chunk->skb->data;
 	serial = ntohl(hdr->serial);
 
+	addr_param = (union sctp_addr_param *)hdr->params;
+	length = ntohs(addr_param->p.length);
+	if (length < sizeof(sctp_paramhdr_t))
+		return sctp_sf_violation_paramlen(ep, asoc, type, arg,
+			   (void *)addr_param, commands);
+
 	/* Verify the ASCONF chunk before processing it. */
-	if (!sctp_verify_asconf(asoc, chunk, true, &err_param))
-		return sctp_sf_violation_paramlen(net, ep, asoc, type, arg,
+	if (!sctp_verify_asconf(asoc,
+			    (sctp_paramhdr_t *)((void *)addr_param + length),
+			    (void *)chunk->chunk_end,
+			    &err_param))
+		return sctp_sf_violation_paramlen(ep, asoc, type, arg,
 						  (void *)err_param, commands);
 
 	/* ADDIP 5.2 E1) Compare the value of the serial number to the value
@@ -3664,8 +3675,11 @@ sctp_disposition_t sctp_sf_do_asconf_ack(const struct sctp_endpoint *ep,
 	rcvd_serial = ntohl(addip_hdr->serial);
 
 	/* Verify the ASCONF-ACK chunk before processing it. */
-	if (!sctp_verify_asconf(asoc, asconf_ack, false, &err_param))
-		return sctp_sf_violation_paramlen(net, ep, asoc, type, arg,
+	if (!sctp_verify_asconf(asoc,
+	    (sctp_paramhdr_t *)addip_hdr->params,
+	    (void *)asconf_ack->chunk_end,
+	    &err_param))
+		return sctp_sf_violation_paramlen(ep, asoc, type, arg,
 			   (void *)err_param, commands);
 
 	if (last_asconf) {
