@@ -30,10 +30,6 @@
 #include <linux/time.h>
 #include <linux/fcntl.h>
 #include <linux/stat.h>
-#ifdef CONFIG_SDCARD_FS_CI_SEARCH
-#include <linux/namei.h>
-#include <linux/dcache.h>
-#endif
 #include <linux/string.h>
 #include <linux/quotaops.h>
 #include <linux/buffer_head.h>
@@ -798,18 +794,6 @@ static inline int ext4_match (int len, const char * const name,
 	return !memcmp(name, de->name, len);
 }
 
-#ifdef CONFIG_SDCARD_FS_CI_SEARCH
-static inline int ext4_ci_match (int len, const char * const name,
-			      struct ext4_dir_entry_2 * de)
-{
-	if (len != de->name_len)
-		return 0;
-	if (!de->inode)
-		return 0;
-	return !strncasecmp(name, de->name, len);
-}
-#endif
-
 /*
  * Returns 0 if not found, -1 on failure, and 1 on success
  */
@@ -817,12 +801,7 @@ static inline int search_dirblock(struct buffer_head *bh,
 				  struct inode *dir,
 				  const struct qstr *d_name,
 				  unsigned int offset,
-#ifdef CONFIG_SDCARD_FS_CI_SEARCH
-				  struct ext4_dir_entry_2 ** res_dir,
-				  char *ci_name_buf)
-#else
 				  struct ext4_dir_entry_2 ** res_dir)
-#endif
 {
 	struct ext4_dir_entry_2 * de;
 	char * dlimit;
@@ -836,38 +815,14 @@ static inline int search_dirblock(struct buffer_head *bh,
 		/* this code is executed quadratically often */
 		/* do minimal checking `by hand' */
 
-#ifdef CONFIG_SDCARD_FS_CI_SEARCH
-		if ((char *) de + namelen <= dlimit) {
-			if (ci_name_buf) {
-				if (ext4_ci_match (namelen, name, de)) {
-					/* found a match - just to be sure, do a full check */
-					if (ext4_check_dir_entry(dir, NULL, de, bh, offset))
-						return -1;
-					*res_dir = de;
-					memcpy(ci_name_buf, de->name, namelen);
-					ci_name_buf[namelen] = '\0';
-					return 1;
-				}
-			} else {
-				if (ext4_match (namelen, name, de)) {
-					/* found a match - just to be sure, do a full check */
-					if (ext4_check_dir_entry(dir, NULL, de, bh, offset))
-						return -1;
-					*res_dir = de;
-					return 1;
-				}
-			}
-		}
-#else
 		if ((char *) de + namelen <= dlimit &&
-			ext4_match (namelen, name, de)) {
+		    ext4_match (namelen, name, de)) {
 			/* found a match - just to be sure, do a full check */
 			if (ext4_check_dir_entry(dir, NULL, de, bh, offset))
 				return -1;
 			*res_dir = de;
 			return 1;
 		}
-#endif
 		/* prevent looping on a bad block */
 		de_len = ext4_rec_len_from_disk(de->rec_len,
 						dir->i_sb->s_blocksize);
@@ -893,12 +848,7 @@ static inline int search_dirblock(struct buffer_head *bh,
  */
 static struct buffer_head * ext4_find_entry (struct inode *dir,
 					const struct qstr *d_name,
-#ifdef CONFIG_SDCARD_FS_CI_SEARCH
-					struct ext4_dir_entry_2 ** res_dir,
-					char *ci_name_buf)
-#else
 					struct ext4_dir_entry_2 ** res_dir)
-#endif
 {
 	struct super_block *sb;
 	struct buffer_head *bh_use[NAMEI_RA_SIZE];
@@ -911,7 +861,7 @@ static struct buffer_head * ext4_find_entry (struct inode *dir,
 				   buffer */
 	int num = 0;
 	ext4_lblk_t  nblocks;
-	int i, err;
+	int i, err = 0;
 	int namelen;
 
 	*res_dir = NULL;
@@ -936,7 +886,11 @@ static struct buffer_head * ext4_find_entry (struct inode *dir,
 		 * return.  Otherwise, fall back to doing a search the
 		 * old fashioned way.
 		 */
-		if (bh || (err != ERR_BAD_DX_DIR))
+		if (err == -ENOENT)
+			return NULL;
+		if (err && err != ERR_BAD_DX_DIR)
+			return ERR_PTR(err);
+		if (bh)
 			return bh;
 		dxtrace(printk(KERN_DEBUG "ext4_find_entry: dx failed, "
 			       "falling back\n"));
@@ -967,6 +921,11 @@ restart:
 				}
 				num++;
 				bh = ext4_getblk(NULL, dir, b++, 0, &err);
+				if (unlikely(err)) {
+					if (ra_max == 0)
+						return ERR_PTR(err);
+					break;
+				}
 				bh_use[ra_max] = bh;
 				if (bh)
 					ll_rw_block(READ | REQ_META | REQ_PRIO,
@@ -983,14 +942,8 @@ restart:
 			brelse(bh);
 			goto next;
 		}
-#ifdef CONFIG_SDCARD_FS_CI_SEARCH
-		i = search_dirblock(bh, dir, d_name,
-			    block << EXT4_BLOCK_SIZE_BITS(sb), res_dir,
-			    ci_name_buf);
-#else
 		i = search_dirblock(bh, dir, d_name,
 			    block << EXT4_BLOCK_SIZE_BITS(sb), res_dir);
-#endif
 		if (i == 1) {
 			EXT4_I(dir)->i_dir_start_lookup = block;
 			ret = bh;
@@ -1040,15 +993,9 @@ static struct buffer_head * ext4_dx_find_entry(struct inode *dir, const struct q
 		if (!(bh = ext4_bread(NULL, dir, block, 0, err)))
 			goto errout;
 
-#ifdef CONFIG_SDCARD_FS_CI_SEARCH
-		retval = search_dirblock(bh, dir, d_name,
-					 block << EXT4_BLOCK_SIZE_BITS(sb),
-					 res_dir, NULL);
-#else
 		retval = search_dirblock(bh, dir, d_name,
 					 block << EXT4_BLOCK_SIZE_BITS(sb),
 					 res_dir);
-#endif
 		if (retval == 1) { 	/* Success! */
 			dx_release(frames);
 			return bh;
@@ -1083,34 +1030,21 @@ static struct dentry *ext4_lookup(struct inode *dir, struct dentry *dentry, stru
 	struct inode *inode;
 	struct ext4_dir_entry_2 *de;
 	struct buffer_head *bh;
-#ifdef CONFIG_SDCARD_FS_CI_SEARCH
-	struct qstr ci_name;
-	char ci_name_buf[EXT4_NAME_LEN+1];
-#endif
 
 	if (dentry->d_name.len > EXT4_NAME_LEN)
 		return ERR_PTR(-ENAMETOOLONG);
 
-#ifdef CONFIG_SDCARD_FS_CI_SEARCH
-	ci_name_buf[0] = '\0';
-	if (nd && (nd->flags & LOOKUP_CASE_INSENSITIVE))
-		bh = ext4_find_entry(dir, &dentry->d_name, &de, ci_name_buf);
-	else
-		bh = ext4_find_entry(dir, &dentry->d_name, &de, NULL);
-#else
 	bh = ext4_find_entry(dir, &dentry->d_name, &de);
-#endif
+	if (IS_ERR(bh))
+		return (struct dentry *) bh;
 	inode = NULL;
 	if (bh) {
 		__u32 ino = le32_to_cpu(de->inode);
+		brelse(bh);
 		if (!ext4_valid_inum(dir->i_sb, ino)) {
-			brelse(bh);
-
 			EXT4_ERROR_INODE(dir, "bad inode number: %u", ino);
 			return ERR_PTR(-EIO);
 		}
-		brelse(bh);
-
 		if (unlikely(ino == dir->i_ino)) {
 			EXT4_ERROR_INODE(dir, "'%.*s' linked to parent dir",
 					 dentry->d_name.len,
@@ -1120,21 +1054,12 @@ static struct dentry *ext4_lookup(struct inode *dir, struct dentry *dentry, stru
 		inode = ext4_iget(dir->i_sb, ino);
 		if (inode == ERR_PTR(-ESTALE)) {
 			EXT4_ERROR_INODE(dir,
-			 "deleted inode referenced: %u  at parent inode : %lu",
-					 		 ino, dir->i_ino);
+					 "deleted inode referenced: %u",
+					 ino);
 			return ERR_PTR(-EIO);
 		}
 	}
-#ifdef CONFIG_SDCARD_FS_CI_SEARCH
-	if (ci_name_buf[0] != '\0') {
-		ci_name.name = ci_name_buf;
-		ci_name.len = dentry->d_name.len;
-		return d_add_ci(dentry, inode, &ci_name);
-	} else
-		return d_splice_alias(inode, dentry);
-#else
 	return d_splice_alias(inode, dentry);
-#endif
 }
 
 
@@ -1148,11 +1073,9 @@ struct dentry *ext4_get_parent(struct dentry *child)
 	struct ext4_dir_entry_2 * de;
 	struct buffer_head *bh;
 
-#ifdef CONFIG_SDCARD_FS_CI_SEARCH
-	bh = ext4_find_entry(child->d_inode, &dotdot, &de, NULL);
-#else
 	bh = ext4_find_entry(child->d_inode, &dotdot, &de);
-#endif
+	if (IS_ERR(bh))
+		return (struct dentry *) bh;
 	if (!bh)
 		return ERR_PTR(-ENOENT);
 	ino = le32_to_cpu(de->inode);
@@ -2226,11 +2149,9 @@ static int ext4_rmdir(struct inode *dir, struct dentry *dentry)
 		return PTR_ERR(handle);
 
 	retval = -ENOENT;
-#ifdef CONFIG_SDCARD_FS_CI_SEARCH
-	bh = ext4_find_entry(dir, &dentry->d_name, &de, NULL);
-#else
 	bh = ext4_find_entry(dir, &dentry->d_name, &de);
-#endif
+	if (IS_ERR(bh))
+		return PTR_ERR(bh);
 	if (!bh)
 		goto end_rmdir;
 
@@ -2295,11 +2216,9 @@ static int ext4_unlink(struct inode *dir, struct dentry *dentry)
 		ext4_handle_sync(handle);
 
 	retval = -ENOENT;
-#ifdef CONFIG_SDCARD_FS_CI_SEARCH
-	bh = ext4_find_entry(dir, &dentry->d_name, &de, NULL);
-#else
 	bh = ext4_find_entry(dir, &dentry->d_name, &de);
-#endif
+	if (IS_ERR(bh))
+		return PTR_ERR(bh);
 	if (!bh)
 		goto end_unlink;
 
@@ -2515,11 +2434,9 @@ static int ext4_rename(struct inode *old_dir, struct dentry *old_dentry,
 	if (IS_DIRSYNC(old_dir) || IS_DIRSYNC(new_dir))
 		ext4_handle_sync(handle);
 
-#ifdef CONFIG_SDCARD_FS_CI_SEARCH
-	old_bh = ext4_find_entry(old_dir, &old_dentry->d_name, &old_de, NULL);
-#else
 	old_bh = ext4_find_entry(old_dir, &old_dentry->d_name, &old_de);
-#endif
+	if (IS_ERR(old_bh))
+		return PTR_ERR(old_bh);
 	/*
 	 *  Check for inode number is _not_ due to possible IO errors.
 	 *  We might rmdir the source, keep it as pwd of some process
@@ -2532,11 +2449,11 @@ static int ext4_rename(struct inode *old_dir, struct dentry *old_dentry,
 		goto end_rename;
 
 	new_inode = new_dentry->d_inode;
-#ifdef CONFIG_SDCARD_FS_CI_SEARCH
-	new_bh = ext4_find_entry(new_dir, &new_dentry->d_name, &new_de, NULL);
-#else
 	new_bh = ext4_find_entry(new_dir, &new_dentry->d_name, &new_de);
-#endif
+	if (IS_ERR(new_bh)) {
+		retval = PTR_ERR(new_bh);
+		goto end_rename;
+	}
 	if (new_bh) {
 		if (!new_inode) {
 			brelse(new_bh);
@@ -2614,12 +2531,10 @@ static int ext4_rename(struct inode *old_dir, struct dentry *old_dentry,
 		struct buffer_head *old_bh2;
 		struct ext4_dir_entry_2 *old_de2;
 
-#ifdef CONFIG_SDCARD_FS_CI_SEARCH
-		old_bh2 = ext4_find_entry(old_dir, &old_dentry->d_name, &old_de2, NULL);
-#else
 		old_bh2 = ext4_find_entry(old_dir, &old_dentry->d_name, &old_de2);
-#endif
-		if (old_bh2) {
+		if (IS_ERR(old_bh2)) {
+			retval = PTR_ERR(old_bh2);
+		} else if (old_bh2) {
 			retval = ext4_delete_entry(handle, old_dir,
 						   old_de2, old_bh2);
 			brelse(old_bh2);
