@@ -33,10 +33,7 @@
 #define DRIVER_AUTHOR "Sarah Sharp"
 #define DRIVER_DESC "'eXtensible' Host Controller (xHC) Driver"
 
-#ifdef CONFIG_USB_DWC_OTG_XCEIV
-#include "xhci-dwc.c"
-#define	XHCI_PLATFORM_DRIVER		xhci_dwc_driver
-#endif
+#define	PORT_WAKE_BITS	(PORT_WKOC_E | PORT_WKDISC_E | PORT_WKCONN_E)
 
 /* Some 0.95 hardware can't handle the chain bit on a Link TRB being cleared */
 static int link_quirk;
@@ -210,28 +207,6 @@ static int xhci_free_msi(struct xhci_hcd *xhci)
 }
 
 /*
- * Free IRQs
- * free all IRQs request
- */
-static void xhci_free_irq(struct xhci_hcd *xhci)
-{
-	struct pci_dev *pdev = to_pci_dev(xhci_to_hcd(xhci)->self.controller);
-	int ret;
-
-	/* return if using legacy interrupt */
-	if (xhci_to_hcd(xhci)->irq > 0)
-		return;
-
-	ret = xhci_free_msi(xhci);
-	if (!ret)
-		return;
-	if (pdev->irq > 0)
-		free_irq(pdev->irq, xhci_to_hcd(xhci));
-
-	return;
-}
-
-/*
  * Set up MSI
  */
 static int xhci_setup_msi(struct xhci_hcd *xhci)
@@ -253,6 +228,28 @@ static int xhci_setup_msi(struct xhci_hcd *xhci)
 	}
 
 	return ret;
+}
+
+/*
+ * Free IRQs
+ * free all IRQs request
+ */
+static void xhci_free_irq(struct xhci_hcd *xhci)
+{
+	struct pci_dev *pdev = to_pci_dev(xhci_to_hcd(xhci)->self.controller);
+	int ret;
+
+	/* return if using legacy interrupt */
+	if (xhci_to_hcd(xhci)->irq > 0)
+		return;
+
+	ret = xhci_free_msi(xhci);
+	if (!ret)
+		return;
+	if (pdev->irq > 0)
+		free_irq(pdev->irq, xhci_to_hcd(xhci));
+
+	return;
 }
 
 /*
@@ -320,9 +317,8 @@ static void xhci_cleanup_msix(struct xhci_hcd *xhci)
 	struct usb_hcd *hcd = xhci_to_hcd(xhci);
 	struct pci_dev *pdev = to_pci_dev(hcd->self.controller);
 
-	/* No need to cleanup msi if we have XHCI_BROKEN_MSI flag */
-	if (xhci->quirks & XHCI_BROKEN_MSI)
-		return 0;
+	if (xhci->quirks & XHCI_PLAT)
+		return;
 
 	xhci_free_irq(xhci);
 
@@ -890,18 +886,56 @@ static void xhci_clear_command_ring(struct xhci_hcd *xhci)
 	xhci_set_cmd_ring_deq(xhci);
 }
 
+static void xhci_disable_port_wake_on_bits(struct xhci_hcd *xhci)
+{
+	int port_index;
+	__le32 __iomem **port_array;
+	unsigned long flags;
+	u32 t1, t2;
+
+	spin_lock_irqsave(&xhci->lock, flags);
+
+	/* disble usb3 ports Wake bits*/
+	port_index = xhci->num_usb3_ports;
+	port_array = xhci->usb3_ports;
+	while (port_index--) {
+		t1 = readl(port_array[port_index]);
+		t1 = xhci_port_state_to_neutral(t1);
+		t2 = t1 & ~PORT_WAKE_BITS;
+		if (t1 != t2)
+			writel(t2, port_array[port_index]);
+	}
+
+	/* disble usb2 ports Wake bits*/
+	port_index = xhci->num_usb2_ports;
+	port_array = xhci->usb2_ports;
+	while (port_index--) {
+		t1 = readl(port_array[port_index]);
+		t1 = xhci_port_state_to_neutral(t1);
+		t2 = t1 & ~PORT_WAKE_BITS;
+		if (t1 != t2)
+			writel(t2, port_array[port_index]);
+	}
+
+	spin_unlock_irqrestore(&xhci->lock, flags);
+}
+
 /*
  * Stop HC (not bus-specific)
  *
  * This is called when the machine transition into S3/S4 mode.
  *
  */
-int xhci_suspend(struct xhci_hcd *xhci)
+int xhci_suspend(struct xhci_hcd *xhci, bool do_wakeup)
 {
 	int			rc = 0;
 	unsigned int		delay = XHCI_MAX_HALT_USEC;
 	struct usb_hcd		*hcd = xhci_to_hcd(xhci);
 	u32			command;
+
+	/* Clear root port wake on bits if wakeup not allowed. */
+	if (!do_wakeup)
+		xhci_disable_port_wake_on_bits(xhci);
 
 	/* Don't poll the roothubs on bus suspend. */
 	xhci_dbg(xhci, "%s: stopping port polling.\n", __func__);
@@ -4246,30 +4280,18 @@ MODULE_LICENSE("GPL");
 
 static int __init xhci_hcd_init(void)
 {
-	int retval = 0;
-#ifdef XHCI_PLATFORM_DRIVER
-	retval = platform_driver_register(&XHCI_PLATFORM_DRIVER);
+	int retval;
 
-	if (retval < 0) {
-		printk(KERN_DEBUG "Problem registering Platform driver.");
-		return retval;
-	}
-#endif
-
-#ifdef CONFIG_PCI
 	retval = xhci_register_pci();
-
 	if (retval < 0) {
 		printk(KERN_DEBUG "Problem registering PCI driver.");
 		return retval;
 	}
-
 	retval = xhci_register_plat();
 	if (retval < 0) {
 		printk(KERN_DEBUG "Problem registering platform driver.");
 		goto unreg_pci;
 	}
-#endif
 	/*
 	 * Check the compiler generated sizes of structures that must be laid
 	 * out in specific ways for hardware access.
@@ -4289,22 +4311,15 @@ static int __init xhci_hcd_init(void)
 	BUILD_BUG_ON(sizeof(struct xhci_run_regs) != (8+8*128)*32/8);
 	BUILD_BUG_ON(sizeof(struct xhci_doorbell_array) != 256*32/8);
 	return 0;
-#ifdef CONFIG_PCI
 unreg_pci:
 	xhci_unregister_pci();
 	return retval;
-#endif
 }
 module_init(xhci_hcd_init);
 
 static void __exit xhci_hcd_cleanup(void)
 {
-#ifdef XHCI_PLATFORM_DRIVER
-	platform_driver_unregister(&XHCI_PLATFORM_DRIVER);
-#endif
-#ifdef CONFIG_PCI
 	xhci_unregister_pci();
 	xhci_unregister_plat();
-#endif
 }
 module_exit(xhci_hcd_cleanup);
