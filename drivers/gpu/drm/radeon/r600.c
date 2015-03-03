@@ -3124,6 +3124,9 @@ int r600_irq_set(struct radeon_device *rdev)
 		WREG32(HDMI1_AUDIO_PACKET_CONTROL, hdmi1);
 	}
 
+	/* posting read */
+	RREG32(R_000E50_SRBM_STATUS);
+
 	return 0;
 }
 
