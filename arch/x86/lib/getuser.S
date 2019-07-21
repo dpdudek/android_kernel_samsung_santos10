@@ -72,20 +72,30 @@ ENTRY(__get_user_4)
 	CFI_ENDPROC
 ENDPROC(__get_user_4)
 
-#ifdef CONFIG_X86_64
 ENTRY(__get_user_8)
 	CFI_STARTPROC
+#ifdef CONFIG_X86_64
 	add $7,%_ASM_AX
 	jc bad_get_user
 	GET_THREAD_INFO(%_ASM_DX)
 	cmp TI_addr_limit(%_ASM_DX),%_ASM_AX
-	jae	bad_get_user
-4:	movq -7(%_ASM_AX),%_ASM_DX
+	jae bad_get_user
+4:	movq -7(%_ASM_AX),%rdx
 	xor %eax,%eax
 	ret
+#else
+	add $7,%_ASM_AX
+	jc bad_get_user_8
+	GET_THREAD_INFO(%_ASM_DX)
+	cmp TI_addr_limit(%_ASM_DX),%_ASM_AX
+	jae bad_get_user_8
+4:	movl -7(%_ASM_AX),%edx
+5:	movl -3(%_ASM_AX),%ecx
+	xor %eax,%eax
+	ret
+#endif
 	CFI_ENDPROC
 ENDPROC(__get_user_8)
-#endif
 
 bad_get_user:
 	CFI_STARTPROC
@@ -94,6 +104,17 @@ bad_get_user:
 	ret
 	CFI_ENDPROC
 END(bad_get_user)
+
+#ifdef CONFIG_X86_32
+bad_get_user_8:
+	CFI_STARTPROC
+	xor %edx,%edx
+	xor %ecx,%ecx
+	mov $(-EFAULT),%_ASM_AX
+	ret
+	CFI_ENDPROC
+END(bad_get_user_8)
+#endif
 
 .section __ex_table,"a"
 	_ASM_PTR 1b,bad_get_user
