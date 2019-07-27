@@ -2589,7 +2589,7 @@ char *__d_path(const struct path *path,
 	write_seqlock(&rename_lock);
 	error = prepend_path(path, root, &res, &buflen);
 	write_sequnlock(&rename_lock);
-	br_read_unlock(vfsmount_lock);
+	br_read_unlock(&vfsmount_lock);
 
 	if (error < 0)
 		return ERR_PTR(error);
@@ -2610,7 +2610,7 @@ char *d_absolute_path(const struct path *path,
 	write_seqlock(&rename_lock);
 	error = prepend_path(path, &root, &res, &buflen);
 	write_sequnlock(&rename_lock);
-	br_read_unlock(vfsmount_lock);
+	br_read_unlock(&vfsmount_lock);
 
 	if (error > 1)
 		error = -EINVAL;
@@ -2678,7 +2678,7 @@ char *d_path(const struct path *path, char *buf, int buflen)
 	write_seqlock(&rename_lock);
 	error = path_with_deleted(path, &root, &res, &buflen);
 	write_sequnlock(&rename_lock);
-	br_read_unlock(vfsmount_lock);
+	br_read_unlock(&vfsmount_lock);
 	if (error < 0)
 		res = ERR_PTR(error);
 	path_put(&root);
@@ -2845,7 +2845,7 @@ SYSCALL_DEFINE2(getcwd, char __user *, buf, unsigned long, size)
 		prepend(&cwd, &buflen, "\0", 1);
 		error = prepend_path(&pwd, &root, &cwd, &buflen);
 		write_sequnlock(&rename_lock);
-		br_read_unlock(vfsmount_lock);
+		br_read_unlock(&vfsmount_lock);
 
 		if (error < 0)
 			goto out;
@@ -2866,7 +2866,7 @@ SYSCALL_DEFINE2(getcwd, char __user *, buf, unsigned long, size)
 		}
 	} else {
 		write_sequnlock(&rename_lock);
-		br_read_unlock(vfsmount_lock);
+		br_read_unlock(&vfsmount_lock);
 	}
 
 out:
