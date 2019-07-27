@@ -129,6 +129,9 @@ struct usb_hcd {
 	unsigned		authorized_default:1;
 	unsigned		has_tt:1;	/* Integrated TT in root hub */
 	unsigned		has_sram:1;	/* Local SRAM for caching */
+
+	unsigned		cant_recv_wakeups:1;
+
 	unsigned		sram_no_payload:1; /* sram not for payload */
 
 	/* Runtime-PM control field for host controller driver, set
