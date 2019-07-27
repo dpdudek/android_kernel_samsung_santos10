@@ -204,12 +204,12 @@ static struct dw_spi_dma_ops mid_dma_ops = {
 #define CLK_SPI_CDIV_MASK	0x00000e00
 #define CLK_SPI_DISABLE_OFFSET	8
 
-int dw_spi_mid_init(struct dw_spi *dws)
+int dw_spi_mid_init(struct dw_spi *dws, int bus_num)
 {
 	void __iomem *clk_reg;
 	u32 clk_cdiv;
 
-	clk_reg = ioremap_nocache(MRST_CLK_SPI0_REG, 16);
+	clk_reg = ioremap_nocache(MRST_CLK_SPI0_REG + bus_num * 4, 16);
 	if (!clk_reg)
 		return -ENOMEM;
 
@@ -219,6 +219,7 @@ int dw_spi_mid_init(struct dw_spi *dws)
 	iounmap(clk_reg);
 
 	dws->num_cs = 16;
+	dws->fifo_len = 40;	/* FIFO has 40 words buffer */
 
 #ifdef CONFIG_SPI_DW_MID_DMA
 	dws->dma_priv = kzalloc(sizeof(struct mid_dma), GFP_KERNEL);
